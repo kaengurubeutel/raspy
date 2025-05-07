@@ -6,6 +6,7 @@ import subprocess
 import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wav
+import pygame
 from datetime import datetime
 from collections import deque
 from scipy.signal import butter, lfilter
@@ -28,7 +29,18 @@ MESSING_FREQUENCY_RANGE = (3000, 20000)  # Frequenzen für Messingplatten
 MEDIA_ROOT = "media/"
 
 COLORS = ["#3D314A", "#EEB160", "#E4E381", "#B9C4DE"]
-
+def play_mp3(mp3_file):
+    # Pygame initialisieren (Mixer für Audio)
+    if(os.path.exists(mp3_file)):
+        pygame.mixer.init()
+        # Lade die MP3-Datei
+        pygame.mixer.music.load(mp3_file)
+        # Starte die Musik
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():  
+            time.sleep(1)  
+    else: 
+        print("no file " +mp3_file+" found")
 
 class Command(BaseCommand):
     help = "Audio Listener with buffer"
@@ -117,12 +129,14 @@ class Command(BaseCommand):
             model_color = COLORS[random.randint(0,3)]
 
             #Modell speichern
-            Wish.objects.create(
+            newwish = Wish.objects.create(
                 sound = wav_path,
                 color = model_color,
-                pub_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-                )
+                pub_date = datetime.now().strftime("%Y%m%d_%H%M%S"))
              # Pause
+            number= newwish.id
+            play_mp3("wishes/management/commands/numbersounds/MCBW_"+ "{:04}".format(number) + ".mp3")
+
             time.sleep(2.0)  # Pause
 
         print("start audio stream")
