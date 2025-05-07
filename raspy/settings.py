@@ -29,7 +29,7 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     'localhost',
     'wishwell.duckdns.org',
-    '[2a01:599:944:1760:29da:212e:cadb:d5b2]'
+    'raspberrypi.tail6260dd.ts.net'
 ]
 
 ASGI_APPLICATION = 'raspy.asgi.application'
