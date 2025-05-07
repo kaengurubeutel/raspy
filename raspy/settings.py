@@ -25,7 +25,11 @@ SECRET_KEY = 'django-insecure-v*@zafzy$&hnc1(n@vr76ku1xkny8vle&6dexahndqq%8tx4fu
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    '127.0.0.1',
+    'localhost',
+    'wishwell.duckdns.org',
+]
 
 ASGI_APPLICATION = 'raspy.asgi.application'
 
