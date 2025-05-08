@@ -3,129 +3,119 @@ import time
 import random
 import uuid
 import subprocess
+from threading import Thread
+from queue import Queue
 import numpy as np
 import scipy.io.wavfile as wav
 import pygame
+import sounddevice as sd
 from datetime import datetime
 from collections import deque
 from scipy.signal import butter, lfilter
-from ...consumers import WishConsumer
-#modell
-import sounddevice as sd
-from wishes.models import Wish
-from ...signals import push_wish_update
-#basecommand
 from django.core.management.base import BaseCommand
+from wishes.models import Wish
 
 # Grundlegende Einstellungen
 SAMPLE_RATE = 44100
-THRESHOLD = 20.0  # Lautstärken threshold
-RECORD_AFTER_TRIGGER = 4.0  # Sekunden nach dem trigger
-CHUNK_DURATION = 0.2  # Sek.
+THRESHOLD = 20.0  # Lautstärken-Threshold
+RECORD_AFTER_TRIGGER = 4.0  # Sekunden nach Trigger
 CHUNK_SIZE = 1024
 BUFFER_SECONDS = 1
-VOICE_FREQUENCY_RANGE = (85, 300)  # Frequenzen der menschlichen Stimme
-MESSING_FREQUENCY_RANGE = (3000, 20000)  # Frequenzen für Messingplatten
+VOICE_FREQ_RANGE = (85, 300)
+MESSING_FREQ_RANGE = (3000, 20000)
 MEDIA_ROOT = "media/"
-
 COLORS = ["#3D314A", "#EEB160", "#E4E381", "#B9C4DE"]
 
-def play_mp3(mp3_file):
-    # Pygame initialisieren (Mixer für Audio)
-    if os.path.exists(mp3_file):
-        # Umwandlung von MP3 zu WAV und dann Ausspielen mit paplay
-        subprocess.run(["ffmpeg", "-i", mp3_file, "-f", "wav", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        subprocess.run(["paplay", "--device=bluez_output.40_C1_F6_33_FA_83.1", mp3_file])  # Bluetooth-Ausgabe
-    else:
-        print("no file " + mp3_file + " found")
+# Audio-Geräte festlegen
+sd.default.device = ("Scarlett 8i6 USB: Audio (hw:2,0)",
+                     "bluez_output.40_C1_F6_33_FA_83.1")
+
+# Queue und Worker für Playback
+play_queue = Queue()
+def player_worker():
+    while True:
+        mp3 = play_queue.get()
+        if mp3 is None:
+            break
+        # Direct playback via paplay
+        subprocess.run(["paplay", "--device=bluez_output.40_C1_F6_33_FA_83.1", mp3])
+        play_queue.task_done()
+Thread(target=player_worker, daemon=True).start()
+
+# Hilfsfunktionen
+
+def butter_bandstop(lowcut, highcut, fs, order=4):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    return butter(order, [low, high], btype='bandstop')
+
+
+def bandpass_filter(data, lowcut, highcut, fs):
+    b, a = butter_bandstop(lowcut, highcut, fs)
+    return lfilter(b, a, data)
 
 class Command(BaseCommand):
     help = "Audio Listener with buffer"
 
     def handle(self, *args, **kwargs):
         os.makedirs(MEDIA_ROOT, exist_ok=True)
-
         ringbuffer = deque(maxlen=int(SAMPLE_RATE * BUFFER_SECONDS))
         triggered = False
-        after_trigger_frames = int(SAMPLE_RATE * RECORD_AFTER_TRIGGER)
-        post_recording = []
+        after_frames = int(SAMPLE_RATE * RECORD_AFTER_TRIGGER)
+        post = []
 
-        def butter_bandstop(lowcut, highcut, fs, order=4):
-            nyquist = 0.5 * fs
-            low = lowcut / nyquist
-            high = highcut / nyquist
-            b, a = butter(order, [low, high], btype='bandstop')
-            return b, a
-
-        def bandpass_filter(data, lowcut, highcut, fs, order=4):
-            b, a = butter_bandstop(lowcut, highcut, fs, order)
-            return lfilter(b, a, data)
-        
         def audio_callback(indata, frames, time_info, status):
-            nonlocal triggered, post_recording
-
+            nonlocal triggered, post
             if status:
                 print("⚠️", status)
-
-            audio_chunk = indata[:, 0]  # Nur Mono aufnehmen
-            ringbuffer.extend(audio_chunk)  # Füge den aktuellen Audio-Chunk zum Ringbuffer hinzu
-
-            # Stimmen herausfiltern (Frequenzen zwischen 85 Hz und 300 Hz dämpfen)
-            audio_chunk_no_voices = bandpass_filter(audio_chunk, VOICE_FREQUENCY_RANGE[0], VOICE_FREQUENCY_RANGE[1], SAMPLE_RATE)
-
-            # Frequenzanalyse: FFT anwenden, um die dominante Frequenz zu bestimmen
-            fft_data = np.fft.fft(audio_chunk_no_voices)
-            freqs = np.fft.fftfreq(len(fft_data), 1 / SAMPLE_RATE)
-            magnitude = np.abs(fft_data)
-
-            peak_freq = freqs[np.argmax(magnitude)]  # Dominante Frequenz ermitteln
-            #print(f"Erkannte Frequenz: {peak_freq} Hz")
-
-            volume = np.linalg.norm(audio_chunk) * 10  # Berechne die Lautstärke des Chunks
-            
-            if MESSING_FREQUENCY_RANGE[0] <= peak_freq <= MESSING_FREQUENCY_RANGE[1]:
-                print(f"lautstärke {volume}, frequenz {peak_freq}")
-                
-                if volume > THRESHOLD:
-                    print("--------Trigger durch Messingplatte erkannt!-----")
+            try:
+                chunk = indata[:, 0]
+                ringbuffer.extend(chunk)
+                filtered = bandpass_filter(chunk, *VOICE_FREQ_RANGE, SAMPLE_RATE)
+                fft = np.fft.fft(filtered)
+                freqs = np.fft.fftfreq(len(fft), 1/SAMPLE_RATE)
+                peak = freqs[np.argmax(np.abs(fft))]
+                volume = np.linalg.norm(chunk) * 10
+                if MESSING_FREQ_RANGE[0] <= peak <= MESSING_FREQ_RANGE[1] and volume > THRESHOLD:
                     if not triggered:
                         triggered = True
-                        post_recording = []  # Setze die Nachaufnahme zurück
+                        post = []
+                if triggered:
+                    post.extend(chunk)
+                    if len(post) >= after_frames:
+                        save_recording(post.copy())
+                        triggered = False
+                        post = []
+            except Exception as e:
+                print("Callback Error:", e)
 
-            if triggered:
-                post_recording.extend(audio_chunk)  # Wenn bereits getriggert, speichere den Chunk in der Nachaufnahme
-                if len(post_recording) >= after_trigger_frames:
-                    save_recording()  # Nachträgliche Aufnahme speichern
-                    triggered = False  # Stoppe die Aufnahme
-                    post_recording = []  # Leere die Nachaufnahme
+        def save_recording(frames_data):
+            try:
+                full = np.array(frames_data, dtype=np.float32)
+                full_int16 = (full * 32767).astype(np.int16)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                wav_name = f"{ts}_{uuid.uuid4().hex}.wav"
+                wav_path = os.path.join(MEDIA_ROOT, wav_name)
+                wav.write(wav_path, SAMPLE_RATE, full_int16)
 
-        def save_recording():
-            full = np.array(post_recording, dtype=np.float32)
+                color = random.choice(COLORS)
+                newwish = Wish.objects.create(sound=wav_path, color=color, pub_date=ts)
+                mp3_file = f"wishes/management/commands/numbersounds/MCBW_{newwish.id:04}.mp3"
+                play_queue.put(mp3_file)
+            except Exception as e:
+                print("Save Error:", e)
 
-            # In 16bit WAV konvertieren
-            full_int16 = (full * 32767).astype(np.int16)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            wav_name = f"{timestamp}_{uuid.uuid4().hex}.wav"
-            wav_path = os.path.join(MEDIA_ROOT, wav_name)
-
-            # WAV-Datei speichern
-            wav.write(wav_path, SAMPLE_RATE, full_int16)
-            
-            model_color = COLORS[random.randint(0, 3)]
-
-            # Modell speichern
-            newwish = Wish.objects.create(
-                sound=wav_path,
-                color=model_color,
-                pub_date=datetime.now().strftime("%Y%m%d_%H%M%S"))
-             # Pause
-            number = newwish.id
-            play_mp3("wishes/management/commands/numbersounds/MCBW_" + "{:04}".format(number) + ".mp3")
-
-            time.sleep(2.0)  # Pause
-
-        print("start audio stream")
-
-        with sd.InputStream(channels=1, samplerate=SAMPLE_RATE, blocksize=CHUNK_SIZE, callback=audio_callback):
-            while True:
-                time.sleep(0.1)  # Pause
+        print("Start Audio Stream")
+        try:
+            with sd.InputStream(channels=1, samplerate=SAMPLE_RATE,
+                                blocksize=CHUNK_SIZE,
+                                callback=audio_callback):
+                while True:
+                    time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        except Exception as e:
+            print("Stream Error:", e)
+        finally:
+            play_queue.put(None)  # Stop Worker
